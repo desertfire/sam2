@@ -82,6 +82,24 @@ class SAM2ImagePredictor:
         sam_model = build_sam2_hf(model_id, **kwargs)
         return cls(sam_model, **kwargs)
 
+    def _compute_feats(self, input_image: torch.Tensor) -> List[torch.Tensor]:
+        assert (
+            len(input_image.shape) == 4 and input_image.shape[1] == 3
+        ), f"input_image must be of size 1x3xHxW, got {input_image.shape}"
+        logging.info("Computing image embeddings for the provided image...")
+
+        backbone_out = self.model.forward_image(input_image)
+        _, vision_feats, _, _ = self.model._prepare_backbone_features(backbone_out)
+        # Add no_mem_embed, which is added to the lowest rest feat. map during training on videos
+        if self.model.directly_add_no_mem_embed:
+            vision_feats[-1] = vision_feats[-1] + self.model.no_mem_embed
+
+        feats = [
+            feat.permute(1, 2, 0).view(1, -1, *feat_size)
+            for feat, feat_size in zip(vision_feats[::-1], self._bb_feat_sizes[::-1])
+        ][::-1]
+        return feats
+
     @torch.no_grad()
     def set_image(
         self,
@@ -109,21 +127,7 @@ class SAM2ImagePredictor:
 
         input_image = self._transforms(image)
         input_image = input_image[None, ...].to(self.device)
-
-        assert (
-            len(input_image.shape) == 4 and input_image.shape[1] == 3
-        ), f"input_image must be of size 1x3xHxW, got {input_image.shape}"
-        logging.info("Computing image embeddings for the provided image...")
-        backbone_out = self.model.forward_image(input_image)
-        _, vision_feats, _, _ = self.model._prepare_backbone_features(backbone_out)
-        # Add no_mem_embed, which is added to the lowest rest feat. map during training on videos
-        if self.model.directly_add_no_mem_embed:
-            vision_feats[-1] = vision_feats[-1] + self.model.no_mem_embed
-
-        feats = [
-            feat.permute(1, 2, 0).view(1, -1, *feat_size)
-            for feat, feat_size in zip(vision_feats[::-1], self._bb_feat_sizes[::-1])
-        ][::-1]
+        feats = self._compute_feats(input_image)
         self._features = {"image_embed": feats[-1], "high_res_feats": feats[:-1]}
         self._is_image_set = True
         logging.info("Image embeddings computed.")
